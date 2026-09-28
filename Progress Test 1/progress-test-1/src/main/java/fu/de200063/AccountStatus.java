@@ -1,4 +1,4 @@
-package lab2.account;
+package fu.de200063;
 
 public enum AccountStatus {
     ACTIVE,
