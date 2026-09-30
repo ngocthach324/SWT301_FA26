@@ -27,12 +27,27 @@ public class AccountServiceTest {
     private static final String PASS = "Secret@123";
     private static final String PHONE = "0912345678";
     private static final LocalDate DOB = LocalDate.now().minusYears(20);
+    private static final String WRONG = "Wrong@123";
 
     AccountService service;
 
     @BeforeEach
     void setUp() {
         service = new AccountService();
+    }
+
+    Account account(String username) {
+        return service.findByUsername(username).orElseThrow();
+    }
+
+    Account defaultAccount() {
+        return account(USER);
+    }
+
+    void failLogin(String username, int times) {
+        for (int i = 0; i < times; i++) {
+            service.login(username, WRONG);
+        }
     }
 
     @Nested
@@ -129,6 +144,198 @@ public class AccountServiceTest {
         void register_AgeBoundary_ReturnsExpectedResultCode(int yearsAgo, int plusDays, ResultCode expected) {
             LocalDate dob = LocalDate.now().minusYears(yearsAgo).plusDays(plusDays);
             assertEquals(expected, service.register(USER, EMAIL, PASS, PASS, dob, null));
+        }
+    }
+
+    @Nested
+    class Login {
+
+        @BeforeEach
+        void setUpUser() {
+            service.register(USER, EMAIL, PASS, PASS, DOB, PHONE);
+        }
+
+        @Test
+        void login_Rule6_CorrectPassword_ReturnsSuccessAndResetsFailedAttempts() {
+            failLogin(USER, 3);
+            assertEquals(3, defaultAccount().getFailedAttempts());
+
+            ResultCode result = service.login(USER, PASS);
+
+            assertEquals(ResultCode.SUCCESS, result);
+            assertEquals(0, defaultAccount().getFailedAttempts());
+            assertFalse(service.isLocked(USER));
+        }
+
+        @Test
+        void login_Rule1_NonExistentUser_ReturnsInvalidCredentials() {
+            ResultCode result = service.login("non_existent_user", PASS);
+            assertEquals(ResultCode.INVALID_CREDENTIALS, result);
+        }
+
+        @Test
+        void login_Rule1_WrongPassword_ReturnsSameInvalidCredentials() {
+            ResultCode result = service.login(USER, WRONG);
+            assertEquals(ResultCode.INVALID_CREDENTIALS, result);
+        }
+
+        @ParameterizedTest(name = "[{index}] Disabled account with password ''{0}'' -> ACCOUNT_DISABLED")
+        @ValueSource(strings = {PASS, WRONG})
+        void login_Rule2_DisabledAccount_ReturnsAccountDisabled(String password) {
+            assertEquals(ResultCode.SUCCESS, service.disableAccount(USER));
+            ResultCode result = service.login(USER, password);
+            assertEquals(ResultCode.ACCOUNT_DISABLED, result);
+        }
+
+        @ParameterizedTest(name = "[{index}] {0} failed attempts -> INVALID_CREDENTIALS")
+        @ValueSource(ints = {1, 2, 3, 4})
+        void login_Rule4_FailedAttemptsUnderThreshold_IncrementsCounterAndRemainsUnlocked(int attempts) {
+            failLogin(USER, attempts);
+
+            assertEquals(attempts, defaultAccount().getFailedAttempts());
+            assertFalse(service.isLocked(USER));
+            assertFalse(defaultAccount().isLocked());
+        }
+
+        @Test
+        void login_Rule5_FifthFailedAttempt_LocksAccountAndReturnsAccountLocked() {
+            failLogin(USER, 4);
+            assertEquals(4, defaultAccount().getFailedAttempts());
+            assertFalse(service.isLocked(USER));
+
+            ResultCode result = service.login(USER, WRONG);
+
+            assertEquals(ResultCode.ACCOUNT_LOCKED, result);
+            assertEquals(5, defaultAccount().getFailedAttempts());
+            assertTrue(service.isLocked(USER));
+            assertTrue(defaultAccount().isLocked());
+        }
+
+        @ParameterizedTest(name = "[{index}] Already locked with password ''{0}'' -> ACCOUNT_LOCKED and counter unchanged")
+        @ValueSource(strings = {PASS, WRONG})
+        void login_Rule3_AlreadyLocked_ReturnsAccountLockedWithoutIncrementingCounter(String password) {
+            failLogin(USER, 5);
+            assertTrue(service.isLocked(USER));
+            int attemptsBefore = defaultAccount().getFailedAttempts();
+
+            ResultCode result = service.login(USER, password);
+
+            assertEquals(ResultCode.ACCOUNT_LOCKED, result);
+            assertEquals(attemptsBefore, defaultAccount().getFailedAttempts());
+            assertTrue(service.isLocked(USER));
+        }
+
+        @ParameterizedTest(name = "[{index}] {0} failures then correct password -> {1}, locked={2}")
+        @CsvSource({
+                "4, SUCCESS, false",
+                "5, ACCOUNT_LOCKED, true",
+                "6, ACCOUNT_LOCKED, true"
+        })
+        void login_CorrectPasswordAfterNFailures(int failures, ResultCode expected, boolean locked) {
+            failLogin(USER, failures);
+
+            ResultCode result = service.login(USER, PASS);
+
+            assertEquals(expected, result);
+            assertEquals(locked, service.isLocked(USER));
+        }
+
+        @Test
+        void login_AfterAdminUnlock_CounterRestartsAndCanLogin() {
+            failLogin(USER, 5);
+            assertTrue(service.isLocked(USER));
+
+            assertEquals(ResultCode.SUCCESS, service.unlockAccount(USER));
+
+            assertFalse(service.isLocked(USER));
+            assertEquals(0, defaultAccount().getFailedAttempts());
+
+            assertEquals(ResultCode.INVALID_CREDENTIALS, service.login(USER, WRONG));
+            assertEquals(1, defaultAccount().getFailedAttempts());
+
+            assertEquals(ResultCode.SUCCESS, service.login(USER, PASS));
+            assertEquals(0, defaultAccount().getFailedAttempts());
+        }
+
+        @ParameterizedTest(name = "[{index}] Username case variation: {0}")
+        @ValueSource(strings = {"alice_01", "ALICE_01", "Alice_01"})
+        void login_UsernameCaseInsensitive_ReturnsSuccess(String usernameVariation) {
+            assertEquals(ResultCode.SUCCESS, service.login(usernameVariation, PASS));
+        }
+
+        @Test
+        void login_PasswordCaseSensitive_WrongCaseReturnsInvalidCredentials() {
+            assertEquals(ResultCode.INVALID_CREDENTIALS, service.login(USER, "secret@123"));
+            assertEquals(ResultCode.INVALID_CREDENTIALS, service.login(USER, "SECRET@123"));
+        }
+
+        @ParameterizedTest(name = "[{index}] Null/blank username: ''{0}''")
+        @NullAndEmptySource
+        @ValueSource(strings = {" ", "   "})
+        void login_BlankUsername_ReturnsInvalidInput(String username) {
+            assertEquals(ResultCode.INVALID_INPUT, service.login(username, PASS));
+        }
+
+        @ParameterizedTest(name = "[{index}] Null/blank password: ''{0}''")
+        @NullAndEmptySource
+        @ValueSource(strings = {" ", "   "})
+        void login_BlankPassword_ReturnsInvalidInput(String password) {
+            assertEquals(ResultCode.INVALID_INPUT, service.login(USER, password));
+        }
+    }
+
+    @Nested
+    class Admin {
+
+        @BeforeEach
+        void setUpUser() {
+            service.register(USER, EMAIL, PASS, PASS, DOB, PHONE);
+        }
+
+        @Test
+        void disableAccount_ExistingUser_ReturnsSuccessAndChangesStatus() {
+            assertEquals(ResultCode.SUCCESS, service.disableAccount(USER));
+            assertEquals(AccountStatus.DISABLED, defaultAccount().getStatus());
+        }
+
+        @ParameterizedTest(name = "[{index}] disableAccount invalid/not found: ''{0}''")
+        @NullAndEmptySource
+        @ValueSource(strings = {" ", "   ", "non_existent"})
+        void disableAccount_InvalidOrNotFoundUser_ReturnsUserNotFound(String username) {
+            assertEquals(ResultCode.USER_NOT_FOUND, service.disableAccount(username));
+        }
+
+        @Test
+        void unlockAccount_LockedUser_ReturnsSuccessAndResetsLockAndCounter() {
+            failLogin(USER, 5);
+            assertTrue(service.isLocked(USER));
+
+            assertEquals(ResultCode.SUCCESS, service.unlockAccount(USER));
+
+            assertFalse(service.isLocked(USER));
+            assertEquals(0, defaultAccount().getFailedAttempts());
+        }
+
+        @ParameterizedTest(name = "[{index}] unlockAccount invalid/not found: ''{0}''")
+        @NullAndEmptySource
+        @ValueSource(strings = {" ", "   ", "non_existent"})
+        void unlockAccount_InvalidOrNotFoundUser_ReturnsUserNotFound(String username) {
+            assertEquals(ResultCode.USER_NOT_FOUND, service.unlockAccount(username));
+        }
+
+        @ParameterizedTest(name = "[{index}] isLocked on invalid/not found user: ''{0}'' -> false")
+        @NullAndEmptySource
+        @ValueSource(strings = {" ", "   ", "non_existent"})
+        void isLocked_InvalidOrNotFoundUser_ReturnsFalse(String username) {
+            assertFalse(service.isLocked(username));
+        }
+
+        @Test
+        void findByUsername_NullOrBlankOrNonExistent_ReturnsEmpty() {
+            assertTrue(service.findByUsername(null).isEmpty());
+            assertTrue(service.findByUsername("").isEmpty());
+            assertTrue(service.findByUsername("   ").isEmpty());
+            assertTrue(service.findByUsername("non_existent").isEmpty());
         }
     }
 
