@@ -17,7 +17,8 @@ public class LoginPage extends BasePage {
     private final By flashMessage  = By.id("flash");
 
     public void navigate() {
-        navigateTo("https://the-internet.herokuapp.com/login");
+        String baseUrl = utils.ConfigReader.get("baseUrl", "https://the-internet.herokuapp.com");
+        navigateTo(baseUrl + "/login");
     }
 
     public void login(String username, String password) {
